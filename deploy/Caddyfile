@@ -1,0 +1,14 @@
+# Caddy gets and renews the Let's Encrypt certificate for {$DOMAIN} automatically.
+{$DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		-Server
+	}
+	# Caddy replaces any client-sent X-Forwarded-For with the real client IP,
+	# so visitors can't spoof their address into the analytics.
+	reverse_proxy web:80
+}

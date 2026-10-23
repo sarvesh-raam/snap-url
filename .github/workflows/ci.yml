@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: snapurl
+          POSTGRES_PASSWORD: snapurl
+          POSTGRES_DB: snapurl_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U snapurl" --health-interval 2s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://snapurl:snapurl@localhost:5432/snapurl_test
+      REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check . && ruff format --check .
+      - name: Migrations apply cleanly and match the models
+        run: alembic upgrade head && alembic check && alembic downgrade base
+      - run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and boot the full stack
+        run: docker compose up -d --build --wait
+      - name: Smoke test through nginx
+        run: |
+          curl -fsS http://localhost:8080/health
+          TOKEN=$(curl -fsS -X POST http://localhost:8080/api/auth/register \
+            -H 'content-type: application/json' \
+            -d '{"email":"ci@example.com","password":"password123"}' | jq -r .access_token)
+          curl -fsS -X POST http://localhost:8080/api/links -H "authorization: Bearer $TOKEN" \
+            -H 'content-type: application/json' -d '{"url":"https://example.com","alias":"ci-smoke"}'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/ci-smoke)" = 302
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/dashboard)" = 200
+      - if: failure()
+        run: docker compose logs

@@ -1,0 +1,107 @@
+# Production stack for a small VM (tested on Oracle Cloud E2.1.Micro: 1 vCPU, 1 GB RAM + swap).
+# Images are built elsewhere and loaded onto the VM, so the VM never runs npm or pip.
+name: snapurl
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  DATABASE_URL: postgresql+asyncpg://snapurl:${POSTGRES_PASSWORD}@postgres:5432/snapurl
+  REDIS_URL: redis://redis:6379/0
+  BASE_URL: https://${DOMAIN}
+  CORS_ORIGINS: '["https://${DOMAIN}"]'
+  JWT_SECRET: ${JWT_SECRET}
+  COOKIE_SECURE: "true"
+  TRUST_PROXY_HEADERS: "true"
+  MAX_LINKS_PER_USER: ${MAX_LINKS_PER_USER:-50}
+  CLICK_STREAM_MAXLEN: "50000"
+  DB_POOL_SIZE: "5"
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: >-
+      postgres -c shared_buffers=32MB -c effective_cache_size=128MB -c work_mem=2MB
+      -c maintenance_work_mem=16MB -c max_connections=40
+    environment:
+      POSTGRES_USER: snapurl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: snapurl
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snapurl"]
+      interval: 5s
+      retries: 30
+    mem_limit: 200m
+    restart: unless-stopped
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    # noeviction: the click stream must never be silently dropped. If Redis fills up,
+    # XADD fails and the API writes clicks straight to Postgres instead.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "48mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 30
+    mem_limit: 80m
+    restart: unless-stopped
+    logging: *logging
+
+  api:
+    image: snapurl-api:latest
+    environment:
+      <<: *backend-env
+      WEB_CONCURRENCY: "1"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      retries: 30
+    mem_limit: 220m
+    restart: unless-stopped
+    logging: *logging
+
+  worker:
+    image: snapurl-api:latest
+    command: ["python", "-m", "app.worker"]
+    environment: *backend-env
+    depends_on:
+      api: { condition: service_healthy }
+    mem_limit: 150m
+    restart: unless-stopped
+    logging: *logging
+
+  web:
+    image: snapurl-web:latest
+    depends_on:
+      api: { condition: service_healthy }
+    mem_limit: 32m
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on: [web]
+    mem_limit: 64m
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:
+  caddyconfig:

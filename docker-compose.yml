@@ -1,0 +1,66 @@
+name: snapurl
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://snapurl:snapurl@postgres:5432/snapurl
+  REDIS_URL: redis://redis:6379/0
+  BASE_URL: ${BASE_URL:-http://localhost:8080}
+  CORS_ORIGINS: '["http://localhost:8080","http://localhost:5173"]'
+  JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-in-production}
+  TRUST_PROXY_HEADERS: "true"
+  GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: snapurl
+      POSTGRES_PASSWORD: snapurl
+      POSTGRES_DB: snapurl
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/scripts/create-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    ports: ["${POSTGRES_PORT:-55432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snapurl"]
+      interval: 2s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    ports: ["${REDIS_PORT:-56379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment: *backend-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      retries: 20
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment: *backend-env
+    depends_on:
+      api: { condition: service_healthy }  # api runs the migrations
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["8080:80"]
+
+volumes:
+  pgdata:
+  redisdata:
